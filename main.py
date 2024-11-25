@@ -13,7 +13,7 @@ sys.path.append("./sam2")
 from sam2.build_sam import build_sam2_video_predictor
 
 color = [(255, 0, 0)]
-resultPrefix = "Alpha-"
+result_prefix = "Alpha-"
 
 def load_txt(gt_path):
     with open(gt_path, 'r') as f:
@@ -54,8 +54,10 @@ def main(args):
             frames = sorted([osp.join(args.video_path, f) for f in os.listdir(args.video_path) if f.endswith(".jpg")])
             loaded_frames = [cv2.imread(frame_path) for frame_path in frames]
             height, width = loaded_frames[0].shape[:2]
+            fps=30
         else:
             cap = cv2.VideoCapture(args.video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
             loaded_frames = []
             while True:
                 ret, frame = cap.read()
@@ -69,15 +71,15 @@ def main(args):
                 raise ValueError("No frames were loaded from the video.")
             
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(args.video_output_path, fourcc, 30, (width, height))
+        out = cv2.VideoWriter(args.video_output_path, fourcc, fps, (width, height))
     
     if args.save_to_img_seq:
         video_path = args.video_path
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         root_folder = os.path.dirname(video_path)
-        if not os.path.exists(os.path.join(root_folder, resultPrefix + video_name)):
-            os.mkdir(os.path.join(root_folder, resultPrefix + video_name))
-        output_path = os.path.join(root_folder, resultPrefix + video_name)
+        if not os.path.exists(os.path.join(root_folder, result_prefix + video_name)):
+            os.mkdir(os.path.join(root_folder, result_prefix + video_name))
+        output_path = os.path.join(root_folder, result_prefix + video_name)
 
     with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
         state = predictor.init_state(frames_or_path, offload_video_to_cpu=True)
@@ -105,26 +107,15 @@ def main(args):
                 for obj_id, mask in mask_to_vis.items():
                     img = loaded_frames[frame_idx].copy()
                     mask_img = np.zeros((height, width, 4), np.uint8)
-                    mask_img[mask] = (255,255,255,255)
-                    # mask_img[mask] = img[mask]
-                    # img = cv2.addWeighted(img, 1, mask_img, 0.75, 0)
-                    cv2.imwrite(os.path.join(output_path, (f"{resultPrefix}{video_name}_{obj_id:03d}_{frame_idx:08d}_.png")), mask_img)
+                    mask_img[mask] = (255,255,255,255)                    
+                    cv2.imwrite(os.path.join(output_path, (f"{result_prefix}{video_name}_{obj_id:03d}_{frame_idx:08d}_.png")), mask_img)
 
             if args.save_to_video:
                 img = loaded_frames[frame_idx]
                 for obj_id, mask in mask_to_vis.items():
-                    if args.show_mask:
-                        mask_img = np.zeros((height, width, 3), np.uint8)
-                        mask_img[mask] = color[(obj_id + 1) % len(color)]
-                        img = cv2.addWeighted(img, 1, mask_img, 0.2, 0)
-                    else:
-                        mask_uint8 = (mask * 255).astype(np.uint8)
-
-                        img_pil = Image.fromarray(img)
-                        masked_img = Image.new('RGBA', img_pil.size)
-                        masked_img.putdata(list(mask_uint8.flatten()))
-                        masked_img = Image.alpha_composite(img_pil.convert('RGBA'), masked_img)
-                        img = np.array(masked_img)
+                    mask_img = np.zeros((height, width, 3), np.uint8)
+                    mask_img[mask] = color[(obj_id + 1) % len(color)]
+                    img = cv2.addWeighted(img, 1, mask_img, 0.2, 0)
 
                 if args.show_bbox:
                     for obj_id, bbox in bbox_to_vis.items():
