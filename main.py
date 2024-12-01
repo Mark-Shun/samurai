@@ -6,15 +6,18 @@ import cv2
 import torch
 import gc
 import sys
-from PIL import Image
-import ffmpeg
 
+# Add custom library path to the system path
 sys.path.append("./sam2")
-from sam2.build_sam import build_sam2_video_predictor
+from sam2.build_sam import build_sam2_video_predictor # Import Sam2's video predictor
 
+# Global variables
 color = [(255, 0, 0)]
 result_prefix = "Alpha-"
+prompts = {}
 
+# Load bounding boxes prompts from text file
+# TODO: Handle multiple Bboxes or Keyframes
 def load_txt(gt_path):
     with open(gt_path, 'r') as f:
         gt = f.readlines()
@@ -22,9 +25,12 @@ def load_txt(gt_path):
     for fid, line in enumerate(gt):
         x, y, w, h = map(float, line.split(','))
         x, y, w, h = int(x), int(y), int(w), int(h)
-        prompts[fid] = ((x, y, x + w, y + h), 0)
+        if fid not in prompts:
+            prompts[fid] = []
+        prompts[fid].append(((x, y, x + w, y + h), 0)) # Store bounding box and label
     return prompts
 
+# Determine appropiate model configuration
 def determine_model_cfg(model_path):
     if "large" in model_path:
         return "configs/samurai/sam2.1_hiera_l.yaml"
@@ -37,6 +43,7 @@ def determine_model_cfg(model_path):
     else:
         raise ValueError("Unknown model size in path!")
 
+# Validate and prepare video frames or frame directory path
 def prepare_frames_or_path(video_path):
     if video_path.endswith(".mp4") or osp.isdir(video_path):
         return video_path
@@ -50,12 +57,12 @@ def main(args):
     prompts = load_txt(args.txt_path)
 
     if args.save_to_video or args.save_to_img_seq:
-        if osp.isdir(args.video_path):
+        if osp.isdir(args.video_path): # If input is a directory of frames
             frames = sorted([osp.join(args.video_path, f) for f in os.listdir(args.video_path) if f.endswith(".jpg")])
             loaded_frames = [cv2.imread(frame_path) for frame_path in frames]
             height, width = loaded_frames[0].shape[:2]
             fps=30
-        else:
+        else: # If input is a video file
             cap = cv2.VideoCapture(args.video_path)
             fps = cap.get(cv2.CAP_PROP_FPS)
             loaded_frames = []
@@ -69,10 +76,11 @@ def main(args):
 
             if len(loaded_frames) == 0:
                 raise ValueError("No frames were loaded from the video.")
-            
+        # Setup video writer    
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(args.video_output_path, fourcc, fps, (width, height))
     
+    # Prepare output folder for image sequence
     if args.save_to_img_seq:
         video_path = args.video_path
         video_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -81,15 +89,21 @@ def main(args):
             os.mkdir(os.path.join(root_folder, result_prefix + video_name))
         output_path = os.path.join(root_folder, result_prefix + video_name)
 
+    # Use the model for tracking and segmentation
     with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
         state = predictor.init_state(frames_or_path, offload_video_to_cpu=True)
-        bbox, track_label = prompts[0]
-        _, _, masks = predictor.add_new_points_or_box(state, box=bbox, frame_idx=0, obj_id=0)
+        
+        # Initialize objects for tracking using all prompts from the first frame
+        # TODO: Handle multiple Bboxes or Keyframes
+        for bbox, track_label in prompts[0]:  # Initialize each prompt
+            predictor.add_new_points_or_box(state, box=bbox, frame_idx=0, obj_id=track_label)
 
+        # Process frames and save results
         for frame_idx, object_ids, masks in predictor.propagate_in_video(state):
-            mask_to_vis = {}
-            bbox_to_vis = {}
+            mask_to_vis = {}  # Dictionary to hold masks for visualization
+            bbox_to_vis = {}  # Dictionary to hold bounding boxes for visualization
 
+            # Extract bounding boxes and masks for each object
             for obj_id, mask in zip(object_ids, masks):
                 mask = mask[0].cpu().numpy()
                 mask = mask > 0.0
@@ -110,14 +124,14 @@ def main(args):
                     mask_img[mask] = (255,255,255,255)                    
                     cv2.imwrite(os.path.join(output_path, (f"{result_prefix}{video_name}_{obj_id:03d}_{frame_idx:08d}_.png")), mask_img)
 
-            if args.save_to_video:
+            if args.save_to_video: # Overlay masks and bounding boxes on video frames
                 img = loaded_frames[frame_idx]
                 for obj_id, mask in mask_to_vis.items():
                     mask_img = np.zeros((height, width, 3), np.uint8)
                     mask_img[mask] = color[(obj_id + 1) % len(color)]
                     img = cv2.addWeighted(img, 1, mask_img, 0.2, 0)
 
-                if args.show_bbox:
+                if args.show_bbox: # Optionally show the bbox
                     for obj_id, bbox in bbox_to_vis.items():
                         cv2.rectangle(img, (bbox[0], bbox[1]), (bbox[0] + bbox[2], bbox[1] + bbox[3]), color[obj_id % len(color)], 2)
 
@@ -126,6 +140,7 @@ def main(args):
         if args.save_to_video:
             out.release()
 
+    # Clean up resources
     del predictor, state
     gc.collect()
     torch.clear_autocast_cache()
